@@ -1,10 +1,12 @@
 import childProcess, { type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import http from "node:http";
 import http2 from "node:http2";
 import https from "node:https";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { installHeadroomTransport, setHeadroomWireRoots, uninstallHeadroomTransport } from "./transport.js";
@@ -1525,6 +1527,43 @@ describe("Headroom OpenCode transport", () => {
           child.stdin?.end();
         });
       }
+    });
+
+    describe("promisify(exec) and promisify(execFile)", () => {
+      // The shim installs this transport in every Node child before the child's
+      // own code runs, so a child that calls promisify(exec) gets the wrapper.
+      it.each(["exec", "execFile"])("promisify(%s) keeps Node's { stdout, stderr } result and injects the env", async (name) => {
+        const { script, run } = probeScript();
+        install();
+        // An env without the proxy variable: only the wrapper's injection can add it.
+        const options = { env: { PATH: process.env.PATH } };
+        const promise =
+          name === "exec"
+            ? promisify(childProcess.exec)(run, options)
+            : promisify(childProcess.execFile)(process.execPath, [script], options);
+        expect((promise as { child?: unknown }).child).toBeInstanceOf(EventEmitter);
+        const result = await promise;
+        expect(result.stderr).toBe("");
+        expect(JSON.parse(String(result.stdout)).proxy).toBe("http://127.0.0.1:8787/v1");
+      });
+
+      it.each(["exec", "execFile"])("promisify(%s) rejects with stdout and stderr on the error", async (name) => {
+        const { dir } = probeScript();
+        const script = path.join(dir, "fail.cjs");
+        fs.writeFileSync(script, "process.stdout.write('out'); process.stderr.write('err'); process.exit(3);");
+        install();
+        const promise =
+          name === "exec"
+            ? promisify(childProcess.exec)(`"${process.execPath}" "${script}"`)
+            : promisify(childProcess.execFile)(process.execPath, [script]);
+        await expect(promise).rejects.toMatchObject({ code: 3, stdout: "out", stderr: "err" });
+      });
+
+      it.each(["exec", "execFile"])("promisify(%s) throws on invalid arguments, as Node does", (name) => {
+        install();
+        const call = promisify(name === "exec" ? childProcess.exec : childProcess.execFile) as unknown as (arg: unknown) => unknown;
+        expect(() => call(123)).toThrow(expect.objectContaining({ code: "ERR_INVALID_ARG_TYPE" }));
+      });
     });
   });
 

@@ -19785,6 +19785,7 @@ function createHeadroomRetrieveTool(config2) {
 
 // src/transport.ts
 import { createRequire, syncBuiltinESMExports } from "module";
+import { promisify } from "util";
 var nodeRequire = createRequire(import.meta.url);
 var http = nodeRequire("node:http");
 var https = nodeRequire("node:https");
@@ -19909,24 +19910,50 @@ function wrapSpawn(originalSpawn) {
     return Reflect.apply(originalSpawn, this, injectOptionsEnv(args, optionIndex, state));
   };
 }
+function withPromisifyCustom(wrapped) {
+  Object.defineProperty(wrapped, promisify.custom, {
+    value(...args) {
+      let resolve;
+      let reject;
+      const promise2 = new Promise((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      const child = Reflect.apply(wrapped, void 0, [
+        ...args,
+        (err, stdout, stderr) => {
+          if (err) {
+            err.stdout = stdout;
+            err.stderr = stderr;
+            reject(err);
+          } else {
+            resolve({ stdout, stderr });
+          }
+        }
+      ]);
+      return Object.assign(promise2, { child });
+    }
+  });
+  return wrapped;
+}
 function wrapExec(originalExec) {
-  return function headroomExec(...args) {
+  return withPromisifyCustom(function headroomExec(...args) {
     const state = getState();
     if (!state) {
       return Reflect.apply(originalExec, this, args);
     }
     return Reflect.apply(originalExec, this, injectOptionsEnv(args, 1, state));
-  };
+  });
 }
 function wrapExecFile(originalExecFile) {
-  return function headroomExecFile(...args) {
+  return withPromisifyCustom(function headroomExecFile(...args) {
     const state = getState();
     if (!state) {
       return Reflect.apply(originalExecFile, this, args);
     }
     const optionIndex = optionsIndexAfterArgs(args);
     return Reflect.apply(originalExecFile, this, injectOptionsEnv(args, optionIndex, state));
-  };
+  });
 }
 function wrapFork(originalFork) {
   return function headroomFork(...args) {

@@ -1,4 +1,5 @@
 import { createRequire, syncBuiltinESMExports } from "node:module";
+import { promisify } from "node:util";
 
 const nodeRequire = createRequire(import.meta.url);
 const http = nodeRequire("node:http") as typeof import("node:http");
@@ -222,25 +223,57 @@ function wrapSpawn(originalSpawn: ChildSpawn): ChildSpawn {
   } as ChildSpawn;
 }
 
+// Node's exec and execFile carry a util.promisify.custom that resolves to
+// { stdout, stderr } and puts both on the error; a plain wrapper loses it, so
+// promisify(exec) resolved to stdout alone. This mirrors Node's
+// customPromiseExecFunction (lib/child_process.js) but calls the wrapper: Node's
+// own custom calls the original function, so it would skip the wrapper.
+function withPromisifyCustom<T extends ChildExec | ChildExecFile>(wrapped: T): T {
+  Object.defineProperty(wrapped, promisify.custom, {
+    value(...args: unknown[]) {
+      let resolve!: (value: { stdout: unknown; stderr: unknown }) => void;
+      let reject!: (reason: unknown) => void;
+      const promise = new Promise<{ stdout: unknown; stderr: unknown }>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      const child = Reflect.apply(wrapped, undefined, [
+        ...args,
+        (err: (Error & { stdout?: unknown; stderr?: unknown }) | null, stdout: unknown, stderr: unknown) => {
+          if (err) {
+            err.stdout = stdout;
+            err.stderr = stderr;
+            reject(err);
+          } else {
+            resolve({ stdout, stderr });
+          }
+        },
+      ]);
+      return Object.assign(promise, { child });
+    },
+  });
+  return wrapped;
+}
+
 function wrapExec(originalExec: ChildExec): ChildExec {
-  return function headroomExec(this: unknown, ...args: unknown[]) {
+  return withPromisifyCustom(function headroomExec(this: unknown, ...args: unknown[]) {
     const state = getState();
     if (!state) {
       return Reflect.apply(originalExec, this, args);
     }
     return Reflect.apply(originalExec, this, injectOptionsEnv(args, 1, state));
-  } as ChildExec;
+  } as ChildExec);
 }
 
 function wrapExecFile(originalExecFile: ChildExecFile): ChildExecFile {
-  return function headroomExecFile(this: unknown, ...args: unknown[]) {
+  return withPromisifyCustom(function headroomExecFile(this: unknown, ...args: unknown[]) {
     const state = getState();
     if (!state) {
       return Reflect.apply(originalExecFile, this, args);
     }
     const optionIndex = optionsIndexAfterArgs(args);
     return Reflect.apply(originalExecFile, this, injectOptionsEnv(args, optionIndex, state));
-  } as ChildExecFile;
+  } as ChildExecFile);
 }
 
 function wrapFork(originalFork: ChildFork): ChildFork {
